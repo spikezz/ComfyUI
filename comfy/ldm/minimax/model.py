@@ -155,16 +155,17 @@ class Attention(nn.Module):
         self.k_norm = operations.RMSNorm(head_dim, eps=eps, dtype=dtype, device=device)
         self.out_proj = operations.Linear(inner, hidden, bias=False, dtype=dtype, device=device)
 
-    def forward(self, x, rope_freqs=None, transformer_options={}):
-        s = x.shape[0]
-        q, k, v = self.qkv_proj(x).split(self.heads * self.head_dim, dim=-1)
+    def forward_projected(self, qkv, rope_freqs=None, transformer_options={}):
+        """Finish attention from an already-computed QKV projection."""
+        s = qkv.shape[0]
+        q, k, v = qkv.split(self.heads * self.head_dim, dim=-1)
         v = v.view(s, self.heads, self.head_dim)
         if rope_freqs is not None:
             # fused per-head RMSNorm + partial split-half rope, in place on the qkv buffer
             q = q.view(1, s, self.heads, self.head_dim)
             k = k.view(1, s, self.heads, self.head_dim)
-            qw = comfy.model_management.cast_to(self.q_norm.weight, device=x.device)
-            kw = comfy.model_management.cast_to(self.k_norm.weight, device=x.device)
+            qw = comfy.model_management.cast_to(self.q_norm.weight, device=qkv.device)
+            kw = comfy.model_management.cast_to(self.k_norm.weight, device=qkv.device)
             rot = rope_freqs.shape[-3] * 2
             if comfy.model_management.in_training:
                 q, k = comfy.quant_ops.ck.rms_rope_split_half(
@@ -177,12 +178,18 @@ class Attention(nn.Module):
         else:
             q = self.q_norm(q.view(s, self.heads, self.head_dim))
             k = self.k_norm(k.view(s, self.heads, self.head_dim))
-        v = v.clone()
         q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))
         k = AttentionTensorContainer(k.transpose(0, 1).unsqueeze(0))
         v = AttentionTensorContainer(v.transpose(0, 1).unsqueeze(0))
         out = optimized_attention(q, k, v, self.heads, mask=None, skip_reshape=True, transformer_options=transformer_options)
         return self.out_proj(out.squeeze(0))
+
+    def forward(self, x, rope_freqs=None, transformer_options={}):
+        return self.forward_projected(
+            self.qkv_proj(x),
+            rope_freqs=rope_freqs,
+            transformer_options=transformer_options,
+        )
 
 
 class MLP(nn.Module):
@@ -270,7 +277,32 @@ class DiTBlock(nn.Module):
     def forward(self, x, t_emb, mod_segments, rope_freqs, transformer_options={}):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(t_emb)
         h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, mod_segments)
-        x = _mod_gate(x, gate_msa, self.attn(h, rope_freqs=rope_freqs, transformer_options=transformer_options), mod_segments)
+        # At the 85k-token production shape this temporary is 1.16 GiB.  On an
+        # <=9 GiB worker it is dead immediately after QKV projection, but the
+        # nested Attention.forward call otherwise keeps it alive while Sage
+        # allocates its INT8 workspace.  Split the exact same operation at that
+        # lifetime boundary; larger GPUs retain the original call path.
+        release_attention_input = (
+            not comfy.model_management.in_training
+            and h.is_cuda
+            and h.shape[0] >= 65536
+            and torch.cuda.get_device_properties(h.device).total_memory <= 9 * 1024**3
+        )
+        if release_attention_input:
+            qkv = self.attn.qkv_proj(h)
+            del h
+            attn_out = self.attn.forward_projected(
+                qkv,
+                rope_freqs=rope_freqs,
+                transformer_options=transformer_options,
+            )
+        else:
+            attn_out = self.attn(
+                h,
+                rope_freqs=rope_freqs,
+                transformer_options=transformer_options,
+            )
+        x = _mod_gate(x, gate_msa, attn_out, mod_segments)
         h = _mod_scale_shift(self.norm2(x), shift_mlp, scale_mlp, mod_segments)
         return _mod_gate(x, gate_mlp, self.mlp(h), mod_segments)
 
@@ -625,6 +657,18 @@ class MiniMaxH3Model(nn.Module):
             else:  # ref_audio / audio
                 h[a:b] = audio_embed[aoff:aoff + n]
                 aoff += n
+
+        # h now owns copies of every materialized source row. Release those
+        # sources before full-sequence DiT attention allocates its workspace.
+        del video_rows
+        del audio_rows
+        del cond_video_rows
+        del cond_audio_rows
+        del all_video_rows
+        del all_audio_rows
+        del video_embed
+        del audio_embed
+        del text_states
 
         t_vals = torch.tensor(unique_t, dtype=torch.float32, device=device)
         if self.use_adaln_curves:

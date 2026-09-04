@@ -152,7 +152,13 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
         if MMAP_TORCH_FILES:
             torch_args["mmap"] = True
 
-        pl_sd = torch.load(ckpt, map_location=device, weights_only=True, **torch_args)
+        try:
+            pl_sd = torch.load(ckpt, map_location=device, weights_only=True, **torch_args)
+        except RuntimeError as e:
+            if "weights_only" in str(e) and "TorchScript" in str(e):
+                pl_sd = torch.load(ckpt, map_location=device, weights_only=False, **torch_args)
+            else:
+                raise
 
         if "state_dict" in pl_sd:
             sd = pl_sd["state_dict"]
