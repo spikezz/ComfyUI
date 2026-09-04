@@ -177,7 +177,6 @@ class Attention(nn.Module):
         else:
             q = self.q_norm(q.view(s, self.heads, self.head_dim))
             k = self.k_norm(k.view(s, self.heads, self.head_dim))
-        v = v.clone()
         q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))
         k = AttentionTensorContainer(k.transpose(0, 1).unsqueeze(0))
         v = AttentionTensorContainer(v.transpose(0, 1).unsqueeze(0))
@@ -625,6 +624,18 @@ class MiniMaxH3Model(nn.Module):
             else:  # ref_audio / audio
                 h[a:b] = audio_embed[aoff:aoff + n]
                 aoff += n
+
+        # h now owns copies of every materialized source row. Release those
+        # sources before full-sequence DiT attention allocates its workspace.
+        del video_rows
+        del audio_rows
+        del cond_video_rows
+        del cond_audio_rows
+        del all_video_rows
+        del all_audio_rows
+        del video_embed
+        del audio_embed
+        del text_states
 
         t_vals = torch.tensor(unique_t, dtype=torch.float32, device=device)
         if self.use_adaln_curves:
