@@ -664,7 +664,6 @@ class LTXAVModel(LTXVModel):
             return vx
         else:
             return [vx, ax]
-        """Recombine audio and video latents for output."""
         # if ax.device != vx.device or ax.dtype != vx.dtype:
         #     logging.warning("Audio and video latents are on different devices or dtypes.")
         #     ax = ax.to(device=vx.device, dtype=vx.dtype)

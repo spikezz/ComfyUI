@@ -45,7 +45,6 @@ class MultiGPUThreadPool:
                 if item is None:
                     return
                 result_q.put((None, e))
-            return
         while True:
             item = work_q.get()
             if item is None:
