@@ -12,10 +12,6 @@ out vec4 fragColor;
 const int MAX_RADIUS = 20;
 const float EPSILON = 0.0001;
 
-// Perceptual luminance
-float getLuminance(vec3 rgb) {
-    return dot(rgb, vec3(0.299, 0.587, 0.114));
-}
 
 vec4 bilateralFilter(vec2 uv, vec2 texelSize, int radius,
                      float sigmaSpatial, float sigmaColor)
