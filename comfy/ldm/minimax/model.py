@@ -294,12 +294,11 @@ class DiTBlock(nn.Module):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(t_emb)
         h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, mod_segments)
         # The normalized input is dead after QKV projection. Release it before
-        # attention allocates its workspace on small inference GPUs, regardless
-        # of sequence length. This changes lifetime only, not model arithmetic.
+        # attention or MLP allocates its workspace during CUDA inference.
+        # This changes lifetime only, not model arithmetic.
         release_attention_input = (
             not comfy.model_management.in_training
             and h.is_cuda
-            and torch.cuda.get_device_properties(h.device).total_memory <= 9 * 1024**3
         )
         if release_attention_input:
             qkv = self.attn.qkv_proj(h)
