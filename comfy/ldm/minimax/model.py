@@ -316,6 +316,8 @@ class DiTBlock(nn.Module):
                 transformer_options=transformer_options,
             )
         x = _mod_gate(x, gate_msa, attn_out, mod_segments)
+        if release_attention_input:
+            del attn_out
         h = _mod_scale_shift(self.norm2(x), shift_mlp, scale_mlp, mod_segments)
         return _mod_gate(x, gate_mlp, self.mlp(h), mod_segments)
 
