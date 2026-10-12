@@ -293,15 +293,12 @@ class DiTBlock(nn.Module):
     def forward(self, x, t_emb, mod_segments, rope_freqs, transformer_options={}):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(t_emb)
         h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, mod_segments)
-        # At the 85k-token production shape this temporary is 1.16 GiB.  On an
-        # <=9 GiB worker it is dead immediately after QKV projection, but the
-        # nested Attention.forward call otherwise keeps it alive while Sage
-        # allocates its INT8 workspace.  Split the exact same operation at that
-        # lifetime boundary; larger GPUs retain the original call path.
+        # The normalized input is dead after QKV projection. Release it before
+        # attention allocates its workspace on small inference GPUs, regardless
+        # of sequence length. This changes lifetime only, not model arithmetic.
         release_attention_input = (
             not comfy.model_management.in_training
             and h.is_cuda
-            and h.shape[0] >= 65536
             and torch.cuda.get_device_properties(h.device).total_memory <= 9 * 1024**3
         )
         if release_attention_input:
