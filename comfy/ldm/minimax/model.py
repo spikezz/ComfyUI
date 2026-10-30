@@ -14,6 +14,7 @@ video schedule (ModelSamplingAV); forward() undoes that scale and converts the
 velocity back, so _forward only ever sees the stream's own latent.
 """
 
+import logging
 import math
 
 import torch
@@ -284,6 +285,23 @@ class TokenRefiner(nn.Module):
         return self.final_norm(x)
 
 
+_attention_override_warned = False
+
+
+def _warn_attention_override_keeps_dead_tensors():
+    """Once per process: DiTBlock.forward runs per block per step, so repeating it would bury it."""
+    global _attention_override_warned
+    if _attention_override_warned:
+        return
+    _attention_override_warned = True
+    logging.warning(
+        "MiniMax-H3: a block patch replaced DiT attention (for example sparse attention). "
+        "While it is active, the attention-input and attention-output release is SKIPPED, so "
+        "both tensors stay alive through attention and MLP and long sequences on small GPUs "
+        "may run out of memory. This warning is shown once per process."
+    )
+
+
 class DiTBlock(nn.Module):
     def __init__(self, hidden, heads, head_dim, ffn, t_dim, eps, qk_eps,
                  apply_silu=True, adaln_dtype=None, gate_compress=False, dtype=None, device=None, operations=None):
@@ -306,11 +324,10 @@ class DiTBlock(nn.Module):
         # This changes lifetime only, not model arithmetic.
         # A block patch that substitutes its own attention (sparse attention)
         # keeps the plain call, because the split would bypass the substitute.
-        release_attention_input = (
-            attention is self.attn
-            and not comfy.model_management.in_training
-            and h.is_cuda
-        )
+        release_dead_tensors = not comfy.model_management.in_training and h.is_cuda
+        release_attention_input = release_dead_tensors and attention is self.attn
+        if release_dead_tensors and not release_attention_input:
+            _warn_attention_override_keeps_dead_tensors()
         if release_attention_input:
             qkv = self.attn.qkv_proj(h)
             del h
